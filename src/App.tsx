@@ -78,7 +78,12 @@ function App() {
         body: { image: { base64, mediaType } }
       });
 
-      if (fnError) throw new Error(fnError.message || 'Gagal memanggil fungsi OCR');
+      // Tangkap error detail dari Edge Function
+      if (fnError) {
+        // Coba baca pesan error dari response body
+        const errMsg = data?.error || fnError.message || 'Gagal memanggil fungsi OCR';
+        throw new Error(errMsg);
+      }
       if (data?.error) throw new Error(data.error);
 
       setRecognizedResult(data as RecognitionResult);

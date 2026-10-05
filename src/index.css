@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply m-0 p-0 text-white min-h-screen flex items-center justify-center font-sans antialiased;
+    background-color: #04120f;
+  }
+
+  body::before {
+    content: '';
+    @apply fixed inset-0 -z-10;
+    background: 
+      linear-gradient(180deg, rgba(4,18,15,0.7) 0%, rgba(4,18,15,0.4) 50%, rgba(4,18,15,0.85) 100%),
+      url('/bg-desktop.webp') center / cover no-repeat;
+  }
+}
+
+@layer utilities {
+  .glass-card {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+
+  .upload-area-dashed {
+    background: rgba(245, 245, 245, 0.8);
+    border: 3px dashed #d4af37;
+    transition: all 0.3s ease;
+  }
+
+  .upload-area-dashed:hover, .upload-area-dashed.dragover {
+    background: rgba(255, 255, 255, 1);
+    border-color: #ffd700;
+    transform: translateY(-2px);
+  }
+}
+
+@media (max-width: 768px) {
+  body {
+    @apply items-start;
+    padding-top: max(16px, env(safe-area-inset-top));
+  }
+  body::before {
+    background: 
+      linear-gradient(180deg, rgba(4,18,15,0.78) 0%, rgba(4,18,15,0.62) 50%, rgba(4,18,15,0.85) 100%),
+      url('/bg-mobile.webp') center / cover no-repeat;
+  }
+}
+
+@media (min-width: 1100px) {
+  body {
+    @apply justify-start pl-[6vw];
+  }
+}
+
+/* Spinner Animation */
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.spinner {
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #d4af37;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+  margin: 20px auto;
+}
+
+@theme {
+  --color-theme-dark: #04120f;
+  --color-theme-gold: #d4af37;
+  --color-theme-light: #e8e8e8;
+  --color-theme-muted: #b0c4de;
+}

@@ -35,7 +35,7 @@ export async function recognize(
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
 
     const prompt = `Kamu adalah ahli Aksara Sunda. Analisis gambar ini secara teliti.
 

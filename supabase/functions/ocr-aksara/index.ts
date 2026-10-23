@@ -1,4 +1,4 @@
-import { recognize } from "./model.ts";
+import { recognize, GeminiRecognitionError } from "./model.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const corsHeaders = {
@@ -145,26 +145,32 @@ Deno.serve(async (req) => {
       console.error("Rate-limit block exception:", e);
     }
 
-    // ── 3. Panggil model OCR (Status 502 jika model gagal/overload/kuota) ──
+    // ── 3. Panggil model OCR (Status 429 jika kuota AI habis, 502 jika gangguan model) ──
     try {
       console.log("Memulai pengenalan aksara oleh model...");
       const result = await withTimeout(
         recognize(image),
-        30_000,
+        40_000,
         "recognize() model",
       );
       console.log("Pengenalan model berhasil selesai.");
 
       return jsonResponse(result, 200);
     } catch (modelError: unknown) {
+      if (modelError instanceof GeminiRecognitionError) {
+        console.error(`[OCR Failure - Status ${modelError.statusCode}] Technical: ${modelError.message}`);
+        return jsonResponse(
+          { error: modelError.userMessage },
+          modelError.statusCode,
+        );
+      }
+
       const technicalMsg = modelError instanceof Error ? modelError.message : String(modelError);
-      // Tulis detail teknis di log server tanpa ekspos rahasia
       console.error("Model recognition technical failure:", technicalMsg);
 
-      // Kembalikan status 502 dengan pesan yang ramah pengguna
       return jsonResponse(
         {
-          error: "Layanan model AI sedang mengalami gangguan atau antrean padat. Silakan coba kembali dalam beberapa saat.",
+          error: "Layanan model AI sedang mengalami gangguan sementara. Silakan coba kembali dalam beberapa saat.",
         },
         502,
       );

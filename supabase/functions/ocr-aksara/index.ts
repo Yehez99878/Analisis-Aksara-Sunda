@@ -29,35 +29,42 @@ Deno.serve(async (req) => {
   }
 
   try {
-    // ── 1. Parse & validasi payload ──────────────────────────
+    // ── 1. Parse & validasi payload (Status 400 jika tidak valid) ──
     let body;
     try {
       body = await req.json();
-    } catch {
-      return jsonResponse({ error: "Body harus berupa JSON yang valid." }, 400);
+    } catch (parseErr) {
+      console.error("Payload JSON parse error:", parseErr);
+      return jsonResponse({ error: "Format request tidak valid (harus berupa JSON)." }, 400);
     }
 
-    const { image } = body;
-    if (!image || !image.base64 || !image.mediaType) {
+    const { image } = body || {};
+    if (!image || typeof image.base64 !== "string" || typeof image.mediaType !== "string") {
+      console.error("Format payload tidak sesuai:", { hasImage: !!image });
       return jsonResponse(
-        { error: "Format payload salah. Harus mengirim: { image: { base64, mediaType } }" },
+        { error: "Format gambar tidak valid. Pastikan gambar terlampir dengan format yang benar." },
         400,
       );
     }
 
     if (image.base64.length > 7_000_000) {
-      return jsonResponse({ error: "Gambar terlalu besar (maksimal ~5 MB)." }, 413);
+      console.error("Ukuran base64 melebihi batas:", image.base64.length);
+      return jsonResponse(
+        { error: "Ukuran gambar terlalu besar. Maksimal ukuran gambar adalah 5 MB." },
+        400,
+      );
     }
 
     const validTypes = ["image/jpeg", "image/png", "image/webp"];
     if (!validTypes.includes(image.mediaType.toLowerCase())) {
+      console.error("Tipe media tidak didukung:", image.mediaType);
       return jsonResponse(
-        { error: "Format tidak didukung. Gunakan JPG, PNG, atau WebP." },
-        415,
+        { error: "Format file tidak didukung. Harap gunakan gambar berformat JPG, PNG, atau WebP." },
+        400,
       );
     }
 
-    // ── 2. Rate limiting (non-blocking, timeout 3 detik) ──────
+    // ── 2. Rate limiting (Status 429 jika batas habis) ────────
     try {
       const supabaseUrl = Deno.env.get("SUPABASE_URL");
       const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
@@ -85,9 +92,14 @@ Deno.serve(async (req) => {
         const user = userRes?.data?.user;
 
         if (user) {
-          const today = new Date().toISOString().split("T")[0];
+          const now = new Date();
+          const today = now.toISOString().split("T")[0];
 
-          // ── FIX: .maybeSingle() — tidak melempar 406 jika 0 baris ──
+          // Hitung waktu reset (tengah malam UTC berikutnya)
+          const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+          const resetTimeStr = tomorrow.toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta", hour: "2-digit", minute: "2-digit" }) + " WIB";
+
+          // .maybeSingle() — tidak melempar 406 jika 0 baris
           const { data: row, error: selErr } = await withTimeout(
             client
               .from("rate_limits")
@@ -104,10 +116,14 @@ Deno.serve(async (req) => {
           }
 
           const currentCount = row?.count ?? 0;
+          const MAX_REQUESTS_PER_DAY = 50;
 
-          if (currentCount >= 50) {
+          if (currentCount >= MAX_REQUESTS_PER_DAY) {
+            console.warn(`User ${user.id} mencapai rate limit (${currentCount}/${MAX_REQUESTS_PER_DAY})`);
             return jsonResponse(
-              { error: "Batas harian tercapai (50 permintaan/hari). Coba lagi besok." },
+              {
+                error: `Batas harian pengenalan aksara telah tercapai (${MAX_REQUESTS_PER_DAY}x per hari). Kuota harian Anda akan direset pada pukul ${resetTimeStr}.`,
+              },
               429,
             );
           }
@@ -129,19 +145,37 @@ Deno.serve(async (req) => {
       console.error("Rate-limit block exception:", e);
     }
 
-    // ── 3. Panggil model OCR (timeout 30 detik) ───────────────
-    console.log("Memulai pengenalan aksara...");
-    const result = await withTimeout(
-      recognize(image),
-      30_000,
-      "recognize() model",
-    );
-    console.log("Pengenalan selesai.");
+    // ── 3. Panggil model OCR (Status 502 jika model gagal/overload/kuota) ──
+    try {
+      console.log("Memulai pengenalan aksara oleh model...");
+      const result = await withTimeout(
+        recognize(image),
+        30_000,
+        "recognize() model",
+      );
+      console.log("Pengenalan model berhasil selesai.");
 
-    return jsonResponse(result, 200);
+      return jsonResponse(result, 200);
+    } catch (modelError: unknown) {
+      const technicalMsg = modelError instanceof Error ? modelError.message : String(modelError);
+      // Tulis detail teknis di log server tanpa ekspos rahasia
+      console.error("Model recognition technical failure:", technicalMsg);
+
+      // Kembalikan status 502 dengan pesan yang ramah pengguna
+      return jsonResponse(
+        {
+          error: "Layanan model AI sedang mengalami gangguan atau antrean padat. Silakan coba kembali dalam beberapa saat.",
+        },
+        502,
+      );
+    }
+
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Terjadi kesalahan internal.";
-    console.error("Edge Function fatal error:", message);
-    return jsonResponse({ error: message }, 500);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("Edge Function internal unhandled failure:", message);
+    return jsonResponse(
+      { error: "Terjadi kendala pada server saat memproses gambar. Silakan coba lagi." },
+      500,
+    );
   }
 });

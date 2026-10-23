@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { FunctionsHttpError } from '@supabase/supabase-js';
 import { supabase } from './lib/supabase';
 import { generatePDF } from './lib/pdf';
 import type { RecognitionResult } from './lib/model';
@@ -80,8 +81,16 @@ function App() {
 
       // Tangkap error detail dari Edge Function
       if (fnError) {
-        // Coba baca pesan error dari response body
-        const errMsg = data?.error || fnError.message || 'Gagal memanggil fungsi OCR';
+        let serverMessage = data?.error;
+        if (!serverMessage && fnError instanceof FunctionsHttpError) {
+          try {
+            const errorJson = await fnError.context.json();
+            serverMessage = errorJson?.error || errorJson?.message;
+          } catch {
+            // Jika konteks response bukan JSON valid, gunakan fallback
+          }
+        }
+        const errMsg = serverMessage || fnError.message || 'Gagal memanggil fungsi OCR';
         throw new Error(errMsg);
       }
       if (data?.error) throw new Error(data.error);

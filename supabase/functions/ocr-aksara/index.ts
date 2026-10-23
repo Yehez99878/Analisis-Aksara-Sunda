@@ -6,109 +6,142 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+function jsonResponse(body: Record<string, unknown>, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+// Helper: jalankan promise dengan batas waktu agar tidak pernah hang
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout (${ms}ms) saat: ${label}`)), ms),
+    ),
+  ]);
+}
+
 Deno.serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   try {
-    // Parse payload terlebih dahulu
+    // ── 1. Parse & validasi payload ──────────────────────────
     let body;
     try {
       body = await req.json();
     } catch {
-      return new Response(
-        JSON.stringify({ error: "Request body harus berupa JSON yang valid." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return jsonResponse({ error: "Body harus berupa JSON yang valid." }, 400);
     }
 
     const { image } = body;
     if (!image || !image.base64 || !image.mediaType) {
-      return new Response(
-        JSON.stringify({ error: "Format payload salah. Harus mengirim image: { base64, mediaType }" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      return jsonResponse(
+        { error: "Format payload salah. Harus mengirim: { image: { base64, mediaType } }" },
+        400,
       );
     }
 
-    // Validasi ukuran (~5MB base64 ≈ ~6.6MB string)
-    if (image.base64.length > 7000000) {
-      return new Response(
-        JSON.stringify({ error: "Ukuran gambar terlalu besar (Maksimal ~5MB)" }),
-        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    if (image.base64.length > 7_000_000) {
+      return jsonResponse({ error: "Gambar terlalu besar (maksimal ~5 MB)." }, 413);
     }
 
-    // Validasi tipe gambar
     const validTypes = ["image/jpeg", "image/png", "image/webp"];
     if (!validTypes.includes(image.mediaType.toLowerCase())) {
-      return new Response(
-        JSON.stringify({ error: "Format gambar tidak didukung (hanya JPG, PNG, WebP)" }),
-        { status: 415, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      return jsonResponse(
+        { error: "Format tidak didukung. Gunakan JPG, PNG, atau WebP." },
+        415,
       );
     }
 
-    // Opsional: Auth & Rate Limiting (tidak memblokir jika gagal)
+    // ── 2. Rate limiting (non-blocking, timeout 3 detik) ──────
     try {
       const supabaseUrl = Deno.env.get("SUPABASE_URL");
       const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
       const authHeader = req.headers.get("Authorization");
 
-      if (supabaseUrl && supabaseAnonKey && authHeader) {
-        const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
-          global: { headers: { Authorization: authHeader } }
+      // Hanya proses jika ada user token (bukan anon key)
+      const token = authHeader?.replace(/^Bearer\s+/i, "");
+      const isAnonKey = token === supabaseAnonKey;
+
+      if (supabaseUrl && supabaseAnonKey && token && !isAnonKey) {
+        const client = createClient(supabaseUrl, supabaseAnonKey, {
+          global: { headers: { Authorization: authHeader } },
         });
 
-        const { data: { user } } = await supabaseClient.auth.getUser();
+        // Timeout 3s untuk auth check
+        const userRes = await withTimeout(
+          client.auth.getUser(),
+          3000,
+          "auth.getUser",
+        ).catch((e) => {
+          console.warn("getUser timeout/error:", e.message);
+          return null;
+        });
+
+        const user = userRes?.data?.user;
 
         if (user) {
-          // Coba rate limiting (skip jika tabel belum ada)
-          const today = new Date().toISOString().split('T')[0];
-          const { data: limitData } = await supabaseClient
-            .from('rate_limits')
-            .select('count')
-            .eq('user_id', user.id)
-            .eq('date', today)
-            .single();
+          const today = new Date().toISOString().split("T")[0];
 
-          const count = limitData?.count ?? 0;
+          // ── FIX: .maybeSingle() — tidak melempar 406 jika 0 baris ──
+          const { data: row, error: selErr } = await withTimeout(
+            client
+              .from("rate_limits")
+              .select("count")
+              .eq("user_id", user.id)
+              .eq("date", today)
+              .maybeSingle(),
+            3000,
+            "rate_limits select",
+          ).catch(() => ({ data: null, error: null }));
 
-          if (count >= 50) {
-            return new Response(
-              JSON.stringify({ error: "Rate limit tercapai (50/hari). Coba lagi besok." }),
-              { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          if (selErr) {
+            console.error("rate_limits SELECT error:", selErr.message);
+          }
+
+          const currentCount = row?.count ?? 0;
+
+          if (currentCount >= 50) {
+            return jsonResponse(
+              { error: "Batas harian tercapai (50 permintaan/hari). Coba lagi besok." },
+              429,
             );
           }
 
-          // Update rate limit counter (best effort)
-          await supabaseClient
-            .from('rate_limits')
+          // Upsert counter (non-blocking)
+          client
+            .from("rate_limits")
             .upsert(
-              { user_id: user.id, date: today, count: count + 1 },
-              { onConflict: 'user_id,date' }
-            ).catch(() => { /* ignore if table doesn't exist */ });
+              { user_id: user.id, date: today, count: currentCount + 1 },
+              { onConflict: "user_id,date" },
+            )
+            .then(({ error: upErr }) => {
+              if (upErr) console.error("rate_limits UPSERT error:", upErr.message);
+            })
+            .catch((e) => console.error("rate_limits UPSERT exception:", e));
         }
       }
     } catch (e) {
-      // Auth/rate-limit gagal bukan alasan untuk menolak request
-      console.warn("Auth/rate-limit warning (non-blocking):", e);
+      console.error("Rate-limit block exception:", e);
     }
 
-    // Jalankan pengenalan aksara
-    const result = await recognize(image);
-
-    return new Response(JSON.stringify(result), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 200,
-    });
-
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    console.error("Edge Function Error:", message);
-    return new Response(
-      JSON.stringify({ error: "Terjadi kesalahan pada server: " + message }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500 }
+    // ── 3. Panggil model OCR (timeout 30 detik) ───────────────
+    console.log("Memulai pengenalan aksara...");
+    const result = await withTimeout(
+      recognize(image),
+      30_000,
+      "recognize() model",
     );
+    console.log("Pengenalan selesai.");
+
+    return jsonResponse(result, 200);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Terjadi kesalahan internal.";
+    console.error("Edge Function fatal error:", message);
+    return jsonResponse({ error: message }, 500);
   }
 });
